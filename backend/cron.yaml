@@ -1,0 +1,10 @@
+cron:
+- description: "bots"
+  url: /bot
+  schedule: every 24 hours
+  target: default
+
+- description: "b"
+  url: /
+  schedule: every 24 hours
+  target: default

@@ -1,0 +1,865 @@
+import ccxt
+import time
+import tensorflow as tf
+import tflearn
+import numpy as np
+import socketio
+import pause
+from flask import Flask,request
+from datetime import datetime,timedelta
+from flask_cors import CORS
+import backtrader as bt
+import quantumrandom
+
+sio = socketio.Server(async_mode='threading')
+app = Flask(__name__)
+
+app.wsgi_app = socketio.Middleware(sio, app.wsgi_app)
+
+wallet = None
+avail = True
+
+cors = CORS(app)
+
+'''
+BEGIN RL
+
+
+
+
+'''
+
+
+def load_model(dir,data,last_w,coins,exchange):
+    with tf.Session(graph=tf.Graph()) as sess:
+        sio.emit('logs', 'Loading model...', namespace='/test', broadcast=True)
+
+        saver = tf.train.import_meta_graph('1/netfile.meta')
+        saver.restore(sess,save_path='1/netfile')
+        tensor = tf.placeholder(tf.float32, shape=[3, 11, 1])
+        adam = sess.graph.get_operation_by_name('Adam')
+        output = sess.graph.get_tensor_by_name('Softmax:0')
+        input = sess.graph.get_tensor_by_name('Placeholder:0')
+
+        i = sess.graph.get_tensor_by_name("Placeholder_1:0")
+        i1 = sess.graph.get_tensor_by_name("Placeholder_2:0")
+        i2 = sess.graph.get_tensor_by_name("Placeholder_3:0")
+
+        tensors = [adam,output]
+        data = data.reshape(1,3,11,31)
+        data = data / data[:, :, -1, 0, None, None]
+
+        np.set_printoptions(suppress=True)
+        d2 = np.zeros((1,11))
+        la = "last w:"+ ' '+str(last_w)
+        sio.emit('logs', la, namespace='/test', broadcast=True)
+        w = np.squeeze(sess.run(output,feed_dict={input:1,i:data,i1:last_w}))
+
+        w = w[-11:]
+        t_vector = np.subtract(last_w,w).tolist()[0]
+        print (t_vector)
+        t = 'Transaction Vector: '+str(t_vector)
+        sio.emit('logs', t ,namespace='/test', broadcast=True)
+        last_w = t_vector
+        reallocate(coins,t_vector,exchange,last_w)
+
+
+def reallocate(coins,t_vector,exchange,last_w):
+    print exchange,'exchange'
+    print t_vector
+
+    balances = exchange.fetch_balance()
+    balances = [balances[x]['free'] for x in coins]
+    print balances
+    tickers = []
+    poins = coins
+    for coin in poins:
+        if coin == 'USDT':
+            coin = 'BTC/USDT'
+            ticker = exchange.fetch_ticker(coin)
+            print ticker
+            tickers.append(ticker['info']['lowestAsk'])
+        else:
+            coin = coin + '/BTC'
+            ticker = exchange.fetch_ticker(coin)
+            print ticker
+            tickers.append(ticker['info']['lowestAsk'])
+    print tickers
+    transactions = []
+
+    for ind,(coin, transaction) in enumerate(zip(coins,t_vector)):
+        if transaction > 0:
+            if coin == "USDT":
+                symbol = "BTC/USDT"
+                buy = exchange.create_order(symbol,amount=transaction,price=tickers[ind],side='buy',type='limit')
+                sio.emit('logs', str(buy), namespace='/test', broadcast=True)
+
+
+            else:
+                symbol = coin+'/BTC'
+                buy = exchange.create_order(symbol,amount=transaction,price=tickers[ind],side='buy',type='limit')
+                sio.emit('logs', str(buy), namespace='/test', broadcast=True)
+
+
+        if transaction < 0:
+            if coin == "USDT":
+                symbol = "BTC/USDT"
+                sell = exchange.create_order(symbol, amount=transaction, price=tickers[ind], side='sell', type='limit')
+                sio.emit('logs', str(sell), namespace='/test', broadcast=True)
+
+
+            else:
+                symbol = coin + '/BTC'
+                sell = exchange.create_order(symbol, amount=transaction, price=tickers[ind], side='sell', type='limit')
+                sio.emit('logs', str(sell), namespace='/test', broadcast=True)
+
+    pause.minutes(30)
+    data, lastw, coins, exchange = prices(exchange,last_w)
+
+    lastw = lastw.reshape(1, -1)
+    model = load_model('1', data, lastw, coins, exchange)
+def prices(exchange,last_w=None):
+    from_datetime = datetime.now() - timedelta(hours=15, minutes=30)
+    print from_datetime
+    from_datetime = from_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    from_timestamp = exchange.parse8601(from_datetime)
+    ETH = exchange.fetch_ohlcv('ETH/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    XRP = exchange.fetch_ohlcv('XRP/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    LTC = exchange.fetch_ohlcv('LTC/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    DASH = exchange.fetch_ohlcv('DASH/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    ETC = exchange.fetch_ohlcv('ETC/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    XMR = exchange.fetch_ohlcv('XMR/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    XEM = exchange.fetch_ohlcv('XEM/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    XLM = exchange.fetch_ohlcv('XLM/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    USDT = exchange.fetch_ohlcv('BTC/USDT', timeframe='30m', since=from_timestamp, limit=37)
+    for li in USDT:
+        li[:] = [1 / x for x in li]
+
+    LSK = exchange.fetch_ohlcv('LSK/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    BCH = exchange.fetch_ohlcv('BCH/BTC', timeframe='30m', since=from_timestamp, limit=37)
+    coins = [USDT, ETH, XRP, XLM, XMR, LTC, XEM, BCH, ETC, DASH, LSK]
+    names = ['USDT', 'ETH', 'XRP', 'XLM', 'XMR', 'LTC', 'XEM', 'BCH', 'ETC', 'DASH', 'LSK']
+    sio.emit('logs', str(names), namespace='/test', broadcast=True)
+
+    counter = -1
+    L = []
+    for coin in coins:
+        counter += 1
+        for period in coin:
+            name = names[counter]
+            date = period[0]
+            low = period[2]
+            high = period[3]
+            close = period[4]
+            L.append([name, date, low, high, close])
+
+    import pandas as pd
+    df = pd.DataFrame(L, columns=['coin', 'date', 'low', 'high', 'close'])
+    df = df.drop(['date'], axis=1)
+    if last_w == None:
+        last_w = [[-0.98176, 0.018265, 0.01821, 0.018255, -0.981775, 0.01824, 0.01822, 0.018235, 0.01827003, 0.018145, 0.01816]]
+    eth = df[df.coin == 'ETH']
+    etc = df[df.coin == 'ETC']
+    xrp = df[df.coin == 'XRP']
+    ltc = df[df.coin == 'LTC']
+    dash = df[df.coin == 'DASH']
+    xmr = df[df.coin == 'XMR']
+    bch = df[df.coin == 'BCH']
+    lsk = df[df.coin == 'LSK']
+    usdt = df[df.coin == 'USDT']
+    xlm = df[df.coin == 'XLM']
+    xem = df[df.coin == 'XEM']
+    eth = eth.drop(['coin'], axis=1).iloc[-31:]
+    xrp = xrp.drop(['coin'], axis=1).iloc[-31:]
+
+    ltc = ltc.drop(['coin'], axis=1).iloc[-31:]
+    etc = etc.drop(['coin'], axis=1).iloc[-31:]
+    dash = dash.drop(['coin'], axis=1).iloc[-31:]
+    xmr = xmr.drop(['coin'], axis=1).iloc[-31:]
+    xem = xem.drop(['coin'], axis=1).iloc[-31:]
+    xlm = xlm.drop(['coin'], axis=1).iloc[-31:]
+    usdt = usdt.drop(['coin'], axis=1).iloc[-31:]
+    bch = bch.drop(['coin'], axis=1).iloc[-31:]
+    lsk = lsk.drop(['coin'], axis=1).iloc[-31:]
+    li = [usdt, eth, xrp, xlm, xmr, ltc, xem, bch, etc, lsk]
+    for l in li:
+        print l.shape
+
+    data = np.stack((usdt.values, eth.values, xrp.values, xlm.values, xmr.values, ltc.values, xem.values, bch.values,
+                     etc.values, dash.values, lsk.values))
+    data = data.reshape(3, 11, 31)
+    return data, last_w, names, exchange
+
+@app.route('/rl',methods=['POST'])
+def run_rl():
+
+    sio.emit('logs', 'STARTING BOT...', namespace='/test', broadcast=True)
+
+    key = request.json['KEY']
+
+    secret = request.json['SECRET']
+    conf = {'apiKey': key,
+            'secret': secret,
+            'nonce': lambda: str(int(time.time() * 1000000))}
+
+    exchange = ccxt.poloniex(conf)
+
+    print exchange.secret,exchange.apiKey
+    now = datetime.now()
+    then = now - timedelta(hours=8,minutes=30)
+    data,lastw,coins,exchange = prices(exchange)
+    sio.emit('coins', str(coins), namespace='/test', broadcast=True)
+
+    print lastw
+    model = load_model('1',data,lastw,coins,exchange)
+
+'''
+BEGIN ARBITRAGE
+
+
+
+
+'''
+class Object(object):
+    def __init__(self):
+        self.exchange = None
+        self.config = None
+        self.value = None
+
+
+def diff(a, b):
+    difference = ((a - b) / a) * 100
+    return difference
+
+
+def split_list(alist, wanted_parts=1):
+    length = len(alist)
+    return [alist[i * length // wanted_parts: (i + 1) * length // wanted_parts]
+            for i in range(wanted_parts)]
+
+
+def run_ticks(tickers,bases,max,names):
+    global wallet,avail,new
+    O = Object()
+    O1 = Object()
+    prices = []
+    ticker_len=len(tickers)
+    traders = []
+    for t in tickers[:ticker_len]:
+        print (t)
+        t = [c for item in t for c in item]
+        print(t)
+        TT= t[1::4]
+        traders.append(t[2::4][0])
+        currencies = t[3::4]
+        for tic,cur in zip(TT,currencies):
+            try:
+                ticker = tic.fetch_ticker(cur)
+                prices.append(ticker['last'])
+                print (ticker,'this is the ticker')
+            except:
+                print('something_wrong')
+                sio.emit('logs', True, namespace='/test', broadcast=True)
+                sio.emit('logs', 'One or more pairs unavailable', namespace='/test', broadcast=True)
+                avail = False
+
+        print(prices)
+        text= ""
+        for p in prices:
+            d = str(p)
+            text+=d +'\n'
+        em = 'Prices($): '+text
+        sio.emit('logs', em, namespace='/test', broadcast=True)
+        time.sleep(2)
+
+    if avail == True:
+        tick1,tick2 = split_list(prices, ticker_len)
+        for index,(v,v1) in enumerate(zip(tick1,tick2)):
+            D = diff(v,v1)
+            print(D)
+            D = np.round(D,decimals=3)
+            sio.emit('logs', 'Difference: ' + str(D), namespace='/test', broadcast=True)
+
+
+            if abs(D) > 1.5:
+                if v > v1:
+                    currency = bases[index]
+                    print(currency)
+                    Trader = traders[1]
+                    Trader1 = traders[0]
+                    fees = Trader.describe()['fees']
+                    maker = fees['trading']['maker']
+                    taker = fees['trading']['taker']
+                    wi = fees['funding']['withdraw']
+                    print(wi)
+
+
+                    try:
+
+                        withdrawal = fees['funding']['withdraw'][currency]
+                        new = v1+ (v1*maker)+ withdrawal
+                        pair = currency+'/USDT'
+                        try:
+                            wallet = Trader1.fetch_deposit_address(currency)
+                            print(wallet)
+
+                            data = 'Wallet Address for Transfer:'+str(wallet)
+                            sio.emit('logs', data, namespace='/test', broadcast=True)
+                        except:
+                            try:
+                                wallet = Trader1.create_deposit_address(currency)
+                                print(wallet)
+                                wallet = wallet['address']
+                                print(wallet)
+                                data = 'Wallet Address for Transfer:' + str(wallet)
+                                sio.emit('logs', data, namespace='/test', broadcast=True)
+                            except:
+                                sio.emit('logs', True, namespace='/test', broadcast=True)
+                                sio.emit('logs', 'Exchange does not allow wallet creation via API, or API down',namespace='/test', broadcast=True)
+                                continue
+                        new_diff = (diff(v,new))
+
+                        print(maker,taker,withdrawal)
+
+                        if new and v > v1:
+                            try:
+                                Trader.create_limit_buy_order(pair, max, v * .001)
+                                balance = Trader.fetch_balance()[currency]
+                                buy = "Starting buy order on" + str(names[1]) + 'for' + str(currency)
+                                sio.emit('logs', buy, namespace='/test', broadcast=True)
+                                Trader.withdraw(currency, balance, wallet)
+                                time.sleep(3)
+                                deposit_exchange_balance = Trader1.fetch_balance()[currency]
+                                check_complete_sell(Trader1, currency, pair, balance, deposit_exchange_balance, names[0])
+                            except:
+
+                                sio.emit('logs', "Problem parsing deposit address, or  Not enough funds", namespace='/test',)
+                    except:
+                        withdrawal = fees['funding']['withdraw']
+                        D = "Can't dynamically parse withdrawl fees, here are the currencies we can:" + str(withdrawal)
+                        sio.emit('logs', D, namespace='/test', broadcast=True)
+
+
+                elif v1 > v:
+                    currency = bases[index]
+                    print(currency)
+                    Trader = traders[0]
+                    Trader1 = traders[1]
+                    fees = Trader.describe()['fees']
+                    maker = fees['trading']['maker']
+                    taker = fees['trading']['taker']
+                    wi = fees['funding']['withdraw']
+                    print(wi)
+
+                    try:
+                        withdrawal = fees['funding']['withdraw'][currency]
+                        new = v + (v * maker) + withdrawal
+                        pair = currency + '/USDT'
+                        try:
+                            wallet = Trader1.fetch_deposit_address(currency)
+                            wallet = wallet['address']
+                            print(wallet)
+                            data = 'Wallet Address for Transfer:'+ str(wallet)
+                            sio.emit('logs', data, namespace='/test', broadcast=True)
+                        except:
+                            try:
+                                wallet = Trader1.create_deposit_address(currency)
+                                wallet = wallet['address']
+                                print(wallet)
+                                data = 'Wallet Address for Transfer:'+ str(wallet)
+                                sio.emit('logs', data, namespace='/test', broadcast=True)
+                            except:
+                                sio.emit('logs', True, namespace='/test', broadcast=True)
+                                sio.emit('logs', 'Exchange does not allow wallet creation via API, or API down', namespace='/test', broadcast=True)
+
+                        new_diff = (diff(v,new))
+
+                        print(maker,taker,withdrawal)
+                    except:
+                        withdrawal = fees['funding']['withdraw']
+                        D = "Can't dynamically parse withdrawl fees, here are the currencies we can:"+str(withdrawal)
+                        sio.emit('logs', True, namespace='/test', broadcast=True)
+
+                        sio.emit('logs', D,namespace='/test', broadcast=True)
+
+                        if new and  v1 > new *.01:
+                            try:
+                                    Trader.create_limit_buy_order(pair,max,v*.001)
+                                    balance = Trader.fetch_balance()[currency]
+                                    buy = "Starting buy order on"+str(names[0])+'for'+str(currency)
+                                    sio.emit('logs',buy, namespace='/test', broadcast=True)
+                                    Trader.withdraw(currency,balance,wallet)
+                                    time.sleep(3)
+                                    deposit_exchange_balance = Trader1.fetch_balance()[currency]
+                                    check_complete_sell(Trader1,currency,pair,balance,deposit_exchange_balance,names[1])
+                            except:
+                                sio.emit('logs', True, namespace='/test', broadcast=True)
+                                sio.emit('logs', "Problem parsing deposit address, or  Not enough funds", namespace='/test', broadcast=True)
+    print(traders)
+    time.sleep(5)
+    run_ticks(tickers,bases,max,names)
+    return 'something'
+
+Check_b = 0
+
+
+def check_complete_sell(trader,currency,pair,amount,o_balance,exch):
+    global Check_b
+    Check_b = trader.fetch_balance()[currency]
+    while Check_b == o_balance:
+        Check_b = trader.fetch_balance()[currency]
+
+    E = "funds arrived at" + str(exch)
+    sio.emit('logs',E, namespace='/test', broadcast=True)
+    sym = str(currency)+ '/USDT'
+    price = trader.fetch_ticker(sym)['last']*.001
+    trader.create_limit_sell_order(pair,Check_b,price)
+    A = 'Selling' + ' '+ str(currency)+ ' '+"to USDT"
+    sio.emit('logs',A, namespace='/test', broadcast=True)
+
+
+
+@app.route('/arbitrage',methods=['POST'])
+def check_oppor():
+
+    sio.emit('logs', 'STARTING BOT...', namespace='/test', broadcast=True)
+    data = request.json
+    exchanges,keys,secrets,currencies,max_usd_trade = data["EXCHANGES"],data["KEYS"],data["SECRETS"],data["CURRENCY"],data["USD"]
+    exchanges = [item for items in exchanges for item in items.split(",")]
+    keys = [item for items in keys for item in items.split(",")]
+    secrets = [item for items in secrets for item in items.split(",")]
+    currencies = [item for items in currencies for item in items.split(",")]
+    ex_len = len(exchanges)
+    configs =[]
+
+    for key,secret in zip(keys,secrets):
+        config = {
+            'apiKey': key,
+            'secret': secret,
+            'nonce': lambda: str(int(time.time() * 1000))
+        }
+        configs.append(config)
+
+
+    indicators = []
+
+    for i,c in enumerate(configs,start=0):
+        Obj = getattr(ccxt, exchanges[i])
+        indicators.append(Obj(c))
+    brokers=[]
+    for n,c in zip(exchanges,configs):
+        broker = bt.brokers.CCXTBroker(exchange=n,
+                                       currency='USDT', config=c)
+        brokers.append(broker)
+    tickers = []
+    for i,c in enumerate(indicators):
+        print(i)
+        for ind, cur in enumerate(currencies):
+            a = cur
+            cur = str(cur)+'/USDT'
+            ticker = indicators[i]
+            tickers.append([a,ticker,c,cur])
+    lists = split_list(tickers,ex_len)
+
+
+
+    print(lists)
+
+    t = run_ticks(lists,currencies,max_usd_trade,exchanges)
+
+
+
+config ={}
+broker = None
+broker1= None
+binance= None
+random_seed = None
+
+cid = ''
+
+
+
+BS = 16
+pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS)
+unpad = lambda s : s[0:-ord(s[-1])]
+
+@app.route('/fries',methods=['GET'])
+def hello():
+    print ("logtest")
+    return 'Hello World!'
+
+
+#@app.route('/')
+
+class Helper(object):
+    def __init__(self):
+        self.random_seed = None
+        self.iv = None
+
+helper = Helper()
+@app.route('/quantum_seed',methods=['GET'])
+def gen_seed():
+    global helper
+    random_seed = quantumrandom.hex()[:32]
+    helper.random_seed = random_seed
+    iv = quantumrandom.hex()[:16]
+    helper.iv = iv
+    crypto = {'seed':random_seed,'iv':iv}
+    return jsonify(crypto)
+
+class maxRiskSizer(bt.Sizer):
+
+
+    params = (('risk', 0.3),)
+
+    def __init__(self):
+        if self.p.risk > 1 or self.p.risk < 0:
+            raise ValueError('The risk parameter is a percentage which must be'
+                             'entered as a float. e.g. 0.5')
+
+    def _getsizing(self, comminfo, cash, data, isbuy):
+        max_risk = math.floor(broker.getcash() * 0.5)
+
+        if isbuy == True:
+            size = max_risk / data[0]
+        else:
+            size = max_risk / data[0] * -1
+
+        # Finally round down to the nearest unit
+        size = math.floor(size)
+        return size
+
+
+
+key =''
+secret =''
+
+
+@sio.on('ema',namespace='/test')
+class EmaCross(bt.SignalStrategy):
+    global broker,broker1,helper
+    global binance
+    fries = 0
+    params = (
+        ('stop_loss', 0.1),
+        ('take_profit', 0.2),
+        ('low', 14),
+        ('high', 90)
+    )
+
+    def log(self, txt, dt=None):
+        global broker,broker1,binance
+        ''' Logging function for this strategy'''
+        dt = dt or self.datas[0].datetime.date(0)
+        time = self.datas[0].datetime.time()
+        print('%s - %s, %s' % (dt.isoformat(), time, txt))
+
+    def __init__(self):
+        global broker,broker1,binance,exchange
+        global config
+        # Keep a reference to the "close"
+        self.dataclose = self.datas[0].close
+        ema1, ema2 = bt.ind.EMA(period=self.p.low), bt.ind.EMA(period=self.p.high)
+        self.signal_add(bt.SIGNAL_LONGSHORT, bt.ind.CrossUp(ema1, ema2))
+        self.signal_add(bt.SIGNAL_LONGSHORT, bt.ind.CrossDown(ema1,ema2))
+        self.crossover = bt.ind.CrossOver(ema1, ema2)
+        self.crossup = bt.ind.CrossUp(ema1, ema2)
+        self.crossdown = bt.ind.CrossDown(ema1, ema2)
+        self.trendy = bt .ind.MomentumOscillator(period=self.p.high)
+        # To keep track of pending orders and buy price/commission
+        if config !={}:
+            print (str(config)+'this is it')
+            binance = getattr(ccxt, exchange)
+
+            binance.trades = 0
+            binance.orders = None
+        self.buyprice = None
+        self.buycomm = None
+        # To keep track of pending orders and buy price/commission
+        self.order = None
+        self.signal = 0
+    #    self.brokercashval = cerebro.broker.get_cash()
+        self.price_at_signal = 0
+        self.trades = 0
+
+       # self.kucoin.fetch_total_balance()['BTC'] = self.broker.getcash()
+
+    def start(self):
+        if config != {}:
+            binance.trades = 0
+            trades = 0
+
+    def notify_trade(self, trade):
+        global broker,broker1,binance
+        if not trade.isclosed or binance.trades:
+            return
+
+        log =  self.log('OPERATION PROFIT, GROSS %.2f, NET %.2f' %
+                 (trade.pnl, trade.pnlcomm))
+        sio.emit('logs', log, namespace='/test', broadcast=True)
+        return log
+
+    def notify_order(self, order):
+        global broker,broker1,binance
+        if order.status in [order.Margin, order.Rejected]:
+            pass
+
+        if order.status in [order.Submitted, order.Accepted]:
+            # Order accepted by the broker. Do nothing.
+            return
+
+        elif order.status == order.Cancelled:
+            log = self.log(' '.join(map(str, [
+                'CANCEL ORDER. Type :', order.info['name'], "/ DATE :",
+                self.data.num2date(order.executed.dt).date().isoformat(),
+                "/ PRICE :",
+                order.executed.price,
+                "/ SIZE :",
+                order.executed.size,
+            ])))
+            sio.emit('logs', log, namespace='/test', broadcast=True)
+            return log
+
+
+        elif order.status == order.Completed:
+            # If a stop loss or take profit is triggered:
+            if 'name' in order.info:
+                log = self.log("%s: REF : %s / %s / PRICE : %.3f / SIZE : %.2f / COMM : %.2f" %
+                         (order.info['name'], order.ref,
+                          self.data.num2date(order.executed.dt).date().isoformat(),
+                          order.executed.price,
+                          order.executed.size,
+                          order.executed.comm))
+                sio.emit('logs', log, namespace='/test', broadcast=True)
+                return log
+            else:
+                if order.isbuy():
+                    # Initialize our take profit and stop loss orders :
+                    stop_loss = order.executed.price * (1.0 - self.params.stop_loss)
+                    take_profit = order.executed.price * (1.0 + self.params.take_profit)
+                    max_risk = (broker.getcash() * 0.5)
+                    size1 = max_risk / self.data.close[0]
+                    stop_order = binance.sell(exectype=bt.Order.StopTrailLimit,
+                                           price=stop_loss, size=size1)
+                    stop_order.addinfo(name="STOP")
+
+                    # OCO : One cancels the Other =&gt; The execution of one instantaneously cancels the other
+                    takeprofit_order = binance.sell(exectype=bt.Order.StopTrailLimit,
+                                                 price=take_profit, size=size1,
+                                                 oco=stop_order)
+                    takeprofit_order.addinfo(name="PROFIT")
+
+                    log =self.log("SignalPrice : %.3f Buy: %.3f, Stop: %.3f, Profit : %.3f"
+                             % (self.price_at_signal,
+                                order.executed.price,
+                                stop_loss,
+                                take_profit))
+                    sio.emit('logs',log,namespace='/test',broadcast=True)
+                    return log
+
+                elif order.issell():
+                    # As before, we initialize our stop loss and take profit here
+                    stop_loss = order.executed.price * (1.0 + self.params.stop_loss)
+                    take_profit = order.executed.price * (1.0 - self.params.take_profit)
+                    max_risk2 = (broker1.getcash() * 0.5)
+                    size2 = max_risk2 / self.data.close[0] * -1
+                    stop_order = binance.buy(exectype=bt.Order.StopTrailLimit,
+                                         price=stop_loss, size=size2)
+                    stop_order.addinfo(name="STOP")
+
+                    # OCO !
+                    takeprofit_order = binance.buy(exectype=bt.Order.StopTrailLimit,
+                                                price=take_profit, size=size2,
+                                                oco=stop_order)
+                    takeprofit_order.addinfo(name="PROFIT")
+
+                    log = self.log("SignalPrice: %.3f Sell: %.3f, Stop: %.3f, Profit : %.3f"
+                             % (self.price_at_signal,
+                                order.executed.price,
+                                stop_loss,
+                                take_profit))
+                    sio.emit('logs', log, namespace='/test', broadcast=True)
+                    return log
+
+    def next(self):
+        global broker,broker1,binance
+        for data in self.datas:
+            print('*' * 5, 'NEXT:', bt.num2date(data.datetime[0]), data._name, data.open[0], data.high[0],
+                  data.low[0], data.close[0], data.volume[0],
+                  bt.TimeFrame.getname(data._timeframe), len(data))
+            logged = ('*' * 5, 'NEXT:', bt.num2date(data.datetime[0]), data._name, data.open[0], data.high[0],
+                  data.low[0], data.close[0], data.volume[0],
+                  bt.TimeFrame.getname(data._timeframe), len(data))
+            text1 =""
+            date = 'Date: '+str(bt.num2date(data.datetime[0]).strftime('%Y-%m-%d'))
+            open = 'Open: '+str(data.open[0])
+            low = 'Low: '+str(data.low[0])
+            high = 'High: '+str(data.high[0])
+            volume = 'Volume: '+str(data.volume[0])
+            logg = date+'\n'+open+'\n'+low+'\n'+high+'\n'+volume
+            text1 += logg
+            sio.emit('logs',text1,namespace='/test',broadcast=True)
+           # self.brokercashval = self.cerebro.broker.get_cash()
+            print('binanceUSDT  Value: ', broker.getcash())
+            logged1 = 'binanceUSDT  Value: '+ str(broker.getcash())
+
+            btc = 'BTC Value: '+str(broker1.getcash())
+            trend = 'EMA Trend Value: '+str(self.trendy[0])
+            text = ""
+
+            text += logged1 + '\n'
+            text += btc + '\n'
+            text += trend
+
+            sio.emit('logs',text,namespace='/test',broadcast=True)
+            print(self.trendy[0])
+            max_risk = (broker.getcash() * 0.5)
+            size1 = max_risk
+            max_risk2 = (broker1.getcash() * 0.5)
+            size2 = max_risk2
+            stop_price = (size1 * self.data.close[0]) * (1 - 0.2)
+            take_profit = (size1 * self.data.close[0]) * (1 + 0.3)
+            stop_price2 =  (size1 * self.data.close[0]) * (1 + 0.2)
+
+
+            if not binance.trades:
+                #size1 = self.bittrex.fetch_balance()['free']['BTC'] * 1.0
+
+
+                if self.crossup:
+
+                 self.log('CrossUp')
+                 binance.create_order(symbol='BTC/USDT', type='LIMIT', side='BUY',amount=15, price=round(self.data.close[0],1),params={'timeInForce':'GTC','quantity':1,'price':self.data.close[0]})
+                 if self.trendy[0] < self.trendy[-1] and self.trendy[-2]:
+                   self.log('Greedy CrossUp')
+                   binance.create_order(symbol='BTC/USDT', type='LIMIT', side='BUY', amount=15,price=round(self.data.close[0],1),params={'timeInForce':'GTC','quantity':1,'price':self.data.close[0]})
+
+                elif self.crossdown:
+                 self.log('Crossdown')
+                 binance.create_order(symbol='BTC/USDT', type='LIMIT', side='SELL', amount=.0018, price=round(self.data.close[0],1),params={'timeInForce':'GTC','quantity':1,'price':self.data.close[0]})
+                 if self.trendy[0] > self.trendy[-1] and self.trendy[-2]:
+                   self.log('Greedy Crossdown')
+                   binance.create_order(symbol='BTC/USDT', type='LIMIT', side='SELL', amount=.0018, price=round(self.data.close[0],1),params={'timeInForce':'GTC','quantity':1,'price':self.data.close[0]})
+
+                else:
+                 return
+
+sio.on('connect',namespace='/test')
+cross = EmaCross
+def d(sid,environ):
+    print('connect + thats sid', sid)
+    sio.emit('connected', namespace='/test',broadcast=True)
+    return
+
+
+
+def decrypt(value):
+    from Crypto.Cipher import AES
+    global helper
+    seed = helper.random_seed
+    iv = helper.iv
+
+    value = unpad(value)
+    aes = AES.new(seed,AES.MODE_CBC,iv)
+    decrypted = aes.decrypt(value)
+    print(decrypted)
+    decrypted = decrypted.decode('utf-8')
+    print(decrypted)
+    return decrypted
+
+
+exchange = None
+
+@sio.on('runner',namespace='/test')
+def run(sid, KEY):
+    global cross,helper,exchange
+    global broker,broker1,config
+    while KEY['API_KEY'] !='':
+        key = KEY['API_KEY']
+        secret = KEY['API_SECRET']
+        #key = decrypt(key)
+        #secret = decrypt(secret)
+        exchange = KEY['EXCHANGE']
+        #t = threading.Timer(2, logged, '/test')
+        #t.start()
+        sio.emit('logs', 'Starting bot...',namespace='/test',broadcast=True)
+        print(key,secret)
+        print('they are above')
+        if key !='':
+            print('got here')
+
+            cerebro = bt.Cerebro()
+            hist_start_date = datetime.utcnow() - timedelta(minutes=240)
+
+
+            config = {
+
+            'apiKey': key,
+            'secret': secret,
+            'nonce': lambda: str(int(time.time() * 1000))
+
+            }
+            sio.emit('ema', namespace='/test')
+            broker = bt.brokers.CCXTBroker(exchange=exchange,
+                                       currency='USDT', config=config)
+            broker = broker
+            sio.emit('logs', str(broker.getcash())+' - USDT BALANCE', namespace='/test', broadcast=True)
+            broker1 = bt.brokers.CCXTBroker(exchange=exchange,
+                                        currency='BTC', config=config)
+            sio.emit('logs', str(broker1.getcash())+' - BTC BALANCE', namespace='/test', broadcast=True)
+
+        # cerebro.setbroker(broker)
+            data0 = bt.feeds.CCXT(exchange=exchange, symbol="BTC/USDT",
+                              timeframe=bt.TimeFrame.Minutes, compression=1, config=config)
+        # data1 = bt.feeds.CCXT(exchange="bittrex")
+
+            cash = broker.getcash()
+        # emit(jsonify(str(cash)))
+            cerebro.adddata(data0)
+        # cerebro.broker.set_cash(100.00)
+            cerebro.addsizer(bt.sizers.PercentSizer, percents=10)
+        # cerebro.addsizer(bt.sizers.SizerFix, stake=0.002)
+        # cerebro.broker.setcommission(commission=0.00005)
+
+            cerebro.addstrategy(strategy=cross,
+                            stop_loss=0.1,
+                            take_profit=0.08,
+                            low=14,
+                            high=90
+                            )
+            print('gotem')
+            cerebro.run()
+
+            return
+
+
+    else:
+        return
+    # hist_end_date = datetime.utcnow() - timedelta(days=1)
+
+
+
+
+
+
+    #g.config = config
+
+
+
+@sio.on('end_connection',namespace='/test')
+def disconn(sid,msg):
+    sio.disconnect(sid,namespace='/test')
+    sio.disconnect(sid)
+    print('disconnecting...')
+    sio.emit('logs',"disconnecting...",namespace='/test',room=sid)
+    return 'Disconnected'
+new = 0
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    app.run(port=8080,threaded=True)
